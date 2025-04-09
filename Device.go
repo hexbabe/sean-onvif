@@ -2,16 +2,13 @@ package onvif
 
 import (
 	"encoding/xml"
-	"errors"
-	"io/ioutil"
+	"fmt"
 	"net/http"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 
 	"github.com/beevik/etree"
-	"github.com/use-go/onvif/device"
 	"github.com/use-go/onvif/gosoap"
 	"github.com/use-go/onvif/networking"
 	wsdiscovery "github.com/use-go/onvif/ws-discovery"
@@ -76,9 +73,8 @@ type DeviceInfo struct {
 // struct represents an abstract ONVIF device.
 // It contains methods, which helps to communicate with ONVIF device
 type Device struct {
-	params    DeviceParams
-	endpoints map[string]string
-	info      DeviceInfo
+	params DeviceParams
+	info   DeviceInfo
 }
 
 type DeviceParams struct {
@@ -89,9 +85,9 @@ type DeviceParams struct {
 }
 
 // GetServices return available endpoints
-func (dev *Device) GetServices() map[string]string {
-	return dev.endpoints
-}
+// func (dev *Device) GetServices() map[string]string {
+//  return dev.endpoints
+// }
 
 // GetDeviceInfo return available endpoints
 func (dev *Device) GetDeviceInfo() DeviceInfo {
@@ -101,14 +97,6 @@ func (dev *Device) GetDeviceInfo() DeviceInfo {
 // GetDeviceParams return available endpoints
 func (dev *Device) GetDeviceParams() DeviceParams {
 	return dev.params
-}
-
-func readResponse(resp *http.Response) string {
-	b, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		panic(err)
-	}
-	return string(b)
 }
 
 // GetAvailableDevicesAtSpecificEthernetInterface ...
@@ -133,7 +121,7 @@ func GetAvailableDevicesAtSpecificEthernetInterface(interfaceName string) ([]Dev
 			if !nvtDevicesSeen[xaddr] {
 				dev, err := NewDevice(DeviceParams{Xaddr: strings.Split(xaddr, " ")[0]})
 				if err != nil {
-					// TODO(jfsmig) print a warning
+					fmt.Printf("Warning: Failed to create device for %s: %v\n", xaddr, err)
 				} else {
 					nvtDevicesSeen[xaddr] = true
 					nvtDevices = append(nvtDevices, *dev)
@@ -145,78 +133,16 @@ func GetAvailableDevicesAtSpecificEthernetInterface(interfaceName string) ([]Dev
 	return nvtDevices, nil
 }
 
-func (dev *Device) getSupportedServices(resp *http.Response) error {
-	doc := etree.NewDocument()
-
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	resp.Body.Close()
-
-	if err := doc.ReadFromBytes(data); err != nil {
-		//log.Println(err.Error())
-		return err
-	}
-
-	services := doc.FindElements("./Envelope/Body/GetCapabilitiesResponse/Capabilities/*/XAddr")
-	for _, j := range services {
-		dev.addEndpoint(j.Parent().Tag, j.Text())
-	}
-
-	extension_services := doc.FindElements("./Envelope/Body/GetCapabilitiesResponse/Capabilities/Extension/*/XAddr")
-	for _, j := range extension_services {
-		dev.addEndpoint(j.Parent().Tag, j.Text())
-	}
-
-	return nil
-}
-
 // NewDevice function construct a ONVIF Device entity
 func NewDevice(params DeviceParams) (*Device, error) {
 	dev := new(Device)
 	dev.params = params
-	dev.endpoints = make(map[string]string)
-	dev.addEndpoint("Device", "http://"+dev.params.Xaddr+"/onvif/device_service")
 
 	if dev.params.HttpClient == nil {
 		dev.params.HttpClient = new(http.Client)
 	}
 
-	getCapabilities := device.GetCapabilities{Category: "All"}
-
-	resp, err := dev.CallMethod(getCapabilities)
-
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return nil, errors.New("camera is not available at " + dev.params.Xaddr + " or it does not support ONVIF services")
-	}
-
-	err = dev.getSupportedServices(resp)
-	if err != nil {
-		return nil, err
-	}
-
 	return dev, nil
-}
-
-func (dev *Device) addEndpoint(Key, Value string) {
-	//use lowCaseKey
-	//make key having ability to handle Mixed Case for Different vendor devcie (e.g. Events EVENTS, events)
-	lowCaseKey := strings.ToLower(Key)
-
-	// Replace host with host from device params.
-	if u, err := url.Parse(Value); err == nil {
-		u.Host = dev.params.Xaddr
-		Value = u.String()
-	}
-
-	dev.endpoints[lowCaseKey] = Value
-}
-
-// GetEndpoint returns specific ONVIF service endpoint address
-func (dev *Device) GetEndpoint(name string) string {
-	return dev.endpoints[name]
 }
 
 func (dev Device) buildMethodSOAP(msg string) (gosoap.SoapMessage, error) {
@@ -234,41 +160,20 @@ func (dev Device) buildMethodSOAP(msg string) (gosoap.SoapMessage, error) {
 	return soap, nil
 }
 
-// getEndpoint functions get the target service endpoint in a better way
-func (dev Device) getEndpoint(endpoint string) (string, error) {
-
-	// common condition, endpointMark in map we use this.
-	if endpointURL, bFound := dev.endpoints[endpoint]; bFound {
-		return endpointURL, nil
-	}
-
-	//but ,if we have endpoint like event、analytic
-	//and sametime the Targetkey like : events、analytics
-	//we use fuzzy way to find the best match url
-	var endpointURL string
-	for targetKey := range dev.endpoints {
-		if strings.Contains(targetKey, endpoint) {
-			endpointURL = dev.endpoints[targetKey]
-			return endpointURL, nil
-		}
-	}
-	return endpointURL, errors.New("target endpoint service not found")
-}
-
 // CallMethod functions call an method, defined <method> struct.
 // You should use Authenticate method to call authorized requests.
 func (dev Device) CallMethod(method interface{}) (*http.Response, error) {
 	pkgPath := strings.Split(reflect.TypeOf(method).PkgPath(), "/")
 	pkg := strings.ToLower(pkgPath[len(pkgPath)-1])
 
-	endpoint, err := dev.getEndpoint(pkg)
-	if err != nil {
-		return nil, err
-	}
+	endpoint := fmt.Sprintf("http://%s/onvif/%s_service", dev.params.Xaddr, pkg)
+
 	return dev.callMethodDo(endpoint, method)
 }
 
-// CallMethod functions call an method, defined <method> struct with authentication data
+// callMethodDo functions call an method, defined <method> struct with authentication data
+// Renamed from callMethodDo to make it the primary internal method caller.
+// It now accepts the dynamically generated endpoint.
 func (dev Device) callMethodDo(endpoint string, method interface{}) (*http.Response, error) {
 	output, err := xml.MarshalIndent(method, "  ", "    ")
 	if err != nil {
@@ -287,6 +192,12 @@ func (dev Device) callMethodDo(endpoint string, method interface{}) (*http.Respo
 	if dev.params.Username != "" && dev.params.Password != "" {
 		soap.AddWSSecurity(dev.params.Username, dev.params.Password)
 	}
+
+	// Print the method being called for debugging
+	fmt.Printf("Sending SOAP request to: %s\n", endpoint)
+	methodName := reflect.TypeOf(method).Name()
+	fmt.Printf("Calling method: %s\n", methodName)
+	fmt.Printf("SOAP request body: %+v\n", soap.String())
 
 	return networking.SendSoap(dev.params.HttpClient, endpoint, soap.String())
 }
