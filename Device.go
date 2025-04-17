@@ -12,6 +12,7 @@ import (
 	"github.com/hexbabe/sean-onvif/gosoap"
 	"github.com/hexbabe/sean-onvif/networking"
 	wsdiscovery "github.com/hexbabe/sean-onvif/ws-discovery"
+	"go.viam.com/rdk/logging"
 )
 
 // Xlmns XML Scheam
@@ -162,19 +163,19 @@ func (dev Device) buildMethodSOAP(msg string) (gosoap.SoapMessage, error) {
 
 // CallMethod functions call an method, defined <method> struct.
 // You should use Authenticate method to call authorized requests.
-func (dev Device) CallMethod(method interface{}) (*http.Response, error) {
+func (dev Device) CallMethod(method interface{}, logger logging.Logger) (*http.Response, error) {
 	pkgPath := strings.Split(reflect.TypeOf(method).PkgPath(), "/")
 	pkg := strings.ToLower(pkgPath[len(pkgPath)-1])
 
 	endpoint := fmt.Sprintf("http://%s/onvif/%s_service", dev.params.Xaddr, pkg)
 
-	return dev.callMethodDo(endpoint, method)
+	return dev.callMethodDo(endpoint, method, logger)
 }
 
 // callMethodDo functions call an method, defined <method> struct with authentication data
 // Renamed from callMethodDo to make it the primary internal method caller.
 // It now accepts the dynamically generated endpoint.
-func (dev Device) callMethodDo(endpoint string, method interface{}) (*http.Response, error) {
+func (dev Device) callMethodDo(endpoint string, method interface{}, logger logging.Logger) (*http.Response, error) {
 	output, err := xml.MarshalIndent(method, "  ", "    ")
 	if err != nil {
 		return nil, err
@@ -193,11 +194,13 @@ func (dev Device) callMethodDo(endpoint string, method interface{}) (*http.Respo
 		soap.AddWSSecurity(dev.params.Username, dev.params.Password)
 	}
 
-	// Print the method being called for debugging
-	fmt.Printf("Sending SOAP request to: %s\n", endpoint)
-	methodName := reflect.TypeOf(method).Name()
-	fmt.Printf("Calling method: %s\n", methodName)
-	fmt.Printf("SOAP request body: %+v\n", soap.String())
+	if logger != nil {
+		// Print the method being called for debugging
+		logger.Debugf("Sending SOAP request to: %s\n", endpoint)
+		methodName := reflect.TypeOf(method).Name()
+		logger.Debugf("Calling method: %s\n", methodName)
+		logger.Debugf("SOAP request body: %+v\n", soap.String())
+	}
 
 	return networking.SendSoap(dev.params.HttpClient, endpoint, soap.String())
 }
